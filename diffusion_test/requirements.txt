@@ -1,0 +1,23 @@
+# Core dependencies for Point Cloud Diffusion Model
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Numerical computing
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# Optional: For loading real point cloud data
+# open3d>=0.17.0
+# trimesh>=3.21.0
+# plyfile>=0.8.0
+
+# Optional: For advanced visualization
+# plotly>=5.14.0
+# pyvista>=0.40.0
