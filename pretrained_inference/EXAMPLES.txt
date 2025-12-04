@@ -1,0 +1,131 @@
+# Example Commands for Pretrained 3D Point Cloud Inference
+
+## Setup
+pip install -r pretrained_inference/requirements.txt
+python pretrained_inference/test_setup.py  # Verify installation
+
+## Point-E Examples
+
+# Basic usage - default prompt
+python pretrained_inference/examples/quick_test_pointe.py
+
+# Custom prompts
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a red sports car"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a wooden chair"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a blue coffee mug"
+
+# Multiple samples
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a tree" --samples 3
+
+# Higher guidance for better prompt following
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a red apple" --guidance-scale 5.0
+
+# Fast mode (no upsampler, fewer points)
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a car" --no-upsampler
+
+# Interactive visualization
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a chair" --visualize plotly
+
+# Both matplotlib and plotly
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a table" --visualize both
+
+## Shap-E Examples
+
+# Basic usage - default prompt
+python pretrained_inference/examples/quick_test_shape.py
+
+# Custom prompts
+python pretrained_inference/examples/quick_test_shape.py --prompt "an avocado armchair"
+python pretrained_inference/examples/quick_test_shape.py --prompt "a donut"
+python pretrained_inference/examples/quick_test_shape.py --prompt "a shark"
+
+# With multi-view rendering
+python pretrained_inference/examples/quick_test_shape.py --prompt "a cactus" --render
+
+# High quality generation
+python pretrained_inference/examples/quick_test_shape.py --prompt "a vintage telephone" --steps 128 --guidance-scale 20
+
+# Multiple samples
+python pretrained_inference/examples/quick_test_shape.py --prompt "a cup" --samples 2
+
+# Mesh only (skip point cloud)
+python pretrained_inference/examples/quick_test_shape.py --prompt "a bowl" --mesh-only
+
+## Batch Generation
+
+# Use default prompts with Point-E
+python pretrained_inference/examples/batch_generate.py --model pointe
+
+# Use default prompts with Shap-E
+python pretrained_inference/examples/batch_generate.py --model shape
+
+# Custom prompts file
+echo -e "a red car\na blue chair\na green apple\na yellow banana\na wooden table" > my_prompts.txt
+python pretrained_inference/examples/batch_generate.py --model pointe --prompts my_prompts.txt
+
+# Custom output directory
+python pretrained_inference/examples/batch_generate.py --model shape --output-dir my_outputs
+
+## Notebook-Style Workflow
+python pretrained_inference/examples/notebook_example.py
+
+## Viewing Results
+
+# Outputs are saved to:
+# - Point-E: outputs/pointe/
+# - Shap-E: outputs/shape/
+# - Batch: outputs/batch/
+# - Notebook: outputs/notebook/
+
+# View PLY files with:
+# - MeshLab (recommended): https://www.meshlab.net/
+# - CloudCompare: https://www.cloudcompare.org/
+# - Blender: https://www.blender.org/
+
+# View visualizations:
+# - PNG files: Any image viewer
+# - HTML files: Open in web browser for interactive 3D
+
+## Tips
+
+# 1. Be specific in prompts
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a shiny red sports car with black wheels"
+
+# 2. Include colors and materials
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a wooden table with metal legs"
+
+# 3. Simple objects work better than complex scenes
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a coffee mug"  # Good
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a coffee shop with tables and chairs"  # May not work as well
+
+# 4. Use Point-E for quick tests, Shap-E for quality
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a chair" --no-upsampler  # Very fast
+python pretrained_inference/examples/quick_test_shape.py --prompt "a chair" --steps 128  # High quality
+
+## Common Prompts That Work Well
+
+# Furniture
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a red armchair"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a wooden dining table"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a modern desk lamp"
+
+# Vehicles
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a blue bicycle"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a yellow taxi cab"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a red motorcycle"
+
+# Food
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a green apple"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a chocolate donut"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a slice of pizza"
+
+# Objects
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a coffee mug"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a potted plant"
+python pretrained_inference/examples/quick_test_pointe.py --prompt "a laptop computer"
+
+# Creative
+python pretrained_inference/examples/quick_test_shape.py --prompt "an avocado armchair"
+python pretrained_inference/examples/quick_test_shape.py --prompt "a pineapple lamp"
+python pretrained_inference/examples/quick_test_shape.py --prompt "a strawberry house"
+

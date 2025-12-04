@@ -1,0 +1,26 @@
+# Core dependencies for 3D point cloud diffusion inference
+torch>=2.0.0
+numpy>=1.21.0
+tqdm>=4.65.0
+
+# Point-E model (OpenAI text-to-3D)
+point-e @ git+https://github.com/openai/point-e.git
+
+# Shap-E model (OpenAI text/image-to-3D with meshes)
+shap-e @ git+https://github.com/openai/shap-e.git
+
+# Visualization
+matplotlib>=3.5.0
+plotly>=5.0.0
+open3d>=0.16.0
+
+# Image processing (for Shap-E rendering)
+Pillow>=9.0.0
+
+# Optional: for faster inference
+# accelerate>=0.20.0
+# xformers>=0.0.16
+
+# Optional: Jupyter notebook support
+# jupyter>=1.0.0
+# ipywidgets>=8.0.0
