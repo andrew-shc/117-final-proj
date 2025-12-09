@@ -26,20 +26,17 @@ class GaussianSplatVAE(nn.Module):
     - [10:14]: rotation (4D quaternion)
     """
     
-    def __init__(self, grid_h=64, grid_w=64, latent_dim=512, hidden_dim=1024):  # INCREASED SIZE
+    def __init__(self, grid_h=64, grid_w=64, latent_dim=256, hidden_dim=512):  # Reduced defaults
         super().__init__()
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.latent_dim = latent_dim
         self.grid_channels = 14  # xyz(3) + sh_dc(3) + opacity(1) + scale(3) + rot(4)
         
-        # Encoder: 3D point cloud → latent code (DEEPER & WIDER)
+        # Encoder: 3D point cloud → latent code (BALANCED SIZE)
         # Uses PointNet-style architecture for permutation invariance
         self.point_encoder = nn.Sequential(
-            nn.Linear(13, hidden_dim),  # input: xyz(3) + sh_dc(3) + opacity(1) + scale(3) + rot(3, ignore w)
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(13, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -48,44 +45,57 @@ class GaussianSplatVAE(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         
-        # Global pooling encoder (DEEPER)
+        # Global pooling encoder
         self.global_encoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, latent_dim * 2),  # mean and logvar
+            nn.Linear(hidden_dim, latent_dim * 2),  # mean and logvar
         )
         
-        # Decoder: latent → 2D grid (DEEPER & WIDER)
+        # Decoder: latent → 2D grid
         self.decoder_fc = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.ReLU(),
         )
         
-        # Upsample to grid resolution (MORE CHANNELS)
-        self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dim, 512, 4, 2, 1),  # 2x2 -> 4x4
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.ConvTranspose2d(512, 256, 4, 2, 1),  # 4x4 -> 8x8
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),   # 8x8 -> 16x16
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),    # 16x16 -> 32x32
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, self.grid_channels, 4, 2, 1),  # 32x32 -> 64x64
-        )
+        # Upsample to grid resolution - adjust based on grid size
+        # For 48x48: 2->4->8->16->48 needs careful sizing
+        if grid_h == 48:
+            self.decoder_conv = nn.Sequential(
+                nn.ConvTranspose2d(hidden_dim, 256, 4, 2, 1),  # 2x2 -> 4x4
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),  # 4x4 -> 8x8
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),   # 8x8 -> 16x16
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.ConvTranspose2d(64, 32, 3, 3, 0),    # 16x16 -> 48x48
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+                nn.Conv2d(32, self.grid_channels, 3, 1, 1),  # 48x48 -> 48x48
+            )
+        else:  # 64x64 or other
+            self.decoder_conv = nn.Sequential(
+                nn.ConvTranspose2d(hidden_dim, 256, 4, 2, 1),  # 2x2 -> 4x4
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),  # 4x4 -> 8x8
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),   # 8x8 -> 16x16
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.ConvTranspose2d(64, 32, 4, 2, 1),    # 16x16 -> 32x32
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+                nn.ConvTranspose2d(32, self.grid_channels, 4, 2, 1),  # 32x32 -> 64x64
+            )
         
     def encode(self, xyz, sh_dc, opacity, scale, rotation):
         """
@@ -396,9 +406,17 @@ def load_3dgs_ply(path):
 class GaussianSplatDataset(torch.utils.data.Dataset):
     """Dataset for loading multiple 3DGS PLY files."""
     
-    def __init__(self, ply_paths, max_points=8192):
+    def __init__(self, ply_paths, max_points=None, subsample_for_training=True):
+        """
+        Args:
+            ply_paths: List of paths to PLY files
+            max_points: Maximum points to keep (None = keep all)
+            subsample_for_training: If True, subsample during training. 
+                                   If False, keep all points (for reconstruction)
+        """
         self.ply_paths = ply_paths
         self.max_points = max_points
+        self.subsample_for_training = subsample_for_training
         
     def __len__(self):
         return len(self.ply_paths)
@@ -406,24 +424,27 @@ class GaussianSplatDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         xyz, sh_dc, opacity, scale, rotation = load_3dgs_ply(self.ply_paths[idx])
         
-        # Subsample or pad to fixed size
         N = len(xyz)
-        if N > self.max_points:
-            indices = np.random.choice(N, self.max_points, replace=False)
-            xyz = xyz[indices]
-            sh_dc = sh_dc[indices]
-            opacity = opacity[indices]
-            scale = scale[indices]
-            rotation = rotation[indices]
-        elif N < self.max_points:
-            # Pad with duplicate points
-            pad_size = self.max_points - N
-            pad_indices = np.random.choice(N, pad_size, replace=True)
-            xyz = np.concatenate([xyz, xyz[pad_indices]], axis=0)
-            sh_dc = np.concatenate([sh_dc, sh_dc[pad_indices]], axis=0)
-            opacity = np.concatenate([opacity, opacity[pad_indices]], axis=0)
-            scale = np.concatenate([scale, scale[pad_indices]], axis=0)
-            rotation = np.concatenate([rotation, rotation[pad_indices]], axis=0)
+        
+        if self.subsample_for_training and self.max_points is not None:
+            # Subsample or pad to fixed size for batching
+            if N > self.max_points:
+                indices = np.random.choice(N, self.max_points, replace=False)
+                xyz = xyz[indices]
+                sh_dc = sh_dc[indices]
+                opacity = opacity[indices]
+                scale = scale[indices]
+                rotation = rotation[indices]
+            elif N < self.max_points:
+                # Pad with duplicate points
+                pad_size = self.max_points - N
+                pad_indices = np.random.choice(N, pad_size, replace=True)
+                xyz = np.concatenate([xyz, xyz[pad_indices]], axis=0)
+                sh_dc = np.concatenate([sh_dc, sh_dc[pad_indices]], axis=0)
+                opacity = np.concatenate([opacity, opacity[pad_indices]], axis=0)
+                scale = np.concatenate([scale, scale[pad_indices]], axis=0)
+                rotation = np.concatenate([rotation, rotation[pad_indices]], axis=0)
+        # else: keep all points (used for reconstruction)
         
         return {
             'xyz': torch.from_numpy(xyz),
@@ -481,13 +502,30 @@ def train_vae(model, train_loader, num_epochs=100, lr=1e-4, device='cuda',
             # Forward pass
             grid, mu, logvar = model(xyz, sh_dc, opacity, scale, rotation)
             
-
+            # Debug: Check grid output
+            if batch_idx == 0 and epoch == 0:
+                print("\n=== Grid Output Check ===")
+                print(f"grid range: [{grid.min().item():.3f}, {grid.max().item():.3f}]")
+                print(f"mu range: [{mu.min().item():.3f}, {mu.max().item():.3f}]")
+                print(f"logvar range: [{logvar.min().item():.3f}, {logvar.max().item():.3f}]")
+                print(f"Any NaN in grid: {torch.isnan(grid).any()}")
+                print(f"Any NaN in mu: {torch.isnan(mu).any()}")
+                print(f"Any NaN in logvar: {torch.isnan(logvar).any()}")
             
-            # Decode back to 3D
+            # Decode back to 3D with MORE samples per cell
             recon_xyz, recon_sh_dc, recon_opacity, recon_scale, recon_rotation = \
-                model.grid_to_gaussians(grid, num_samples_per_cell=1)
+                model.grid_to_gaussians(grid, num_samples_per_cell=SAMPLES_PER_CELL)  # More samples for better coverage
             
-
+            # Debug: Check reconstruction output
+            if batch_idx == 0 and epoch == 0:
+                print("\n=== Reconstruction Output Check ===")
+                print(f"recon_xyz range: [{recon_xyz.min().item():.3f}, {recon_xyz.max().item():.3f}]")
+                print(f"recon_sh_dc range: [{recon_sh_dc.min().item():.3f}, {recon_sh_dc.max().item():.3f}]")
+                print(f"recon_opacity range: [{recon_opacity.min().item():.3f}, {recon_opacity.max().item():.3f}]")
+                print(f"recon_scale range: [{recon_scale.min().item():.3f}, {recon_scale.max().item():.3f}]")
+                print(f"recon_rotation range: [{recon_rotation.min().item():.3f}, {recon_rotation.max().item():.3f}]")
+                print(f"Any NaN in recon_xyz: {torch.isnan(recon_xyz).any()}")
+                print(f"Any NaN in recon_scale: {torch.isnan(recon_scale).any()}\n")
             
             # Compute loss
             loss, loss_dict = vae_loss(
@@ -496,6 +534,12 @@ def train_vae(model, train_loader, num_epochs=100, lr=1e-4, device='cuda',
                 mu, logvar, kl_weight=kl_weight
             )
             
+            # Check if loss is NaN
+            if torch.isnan(loss):
+                print(f"\n!!! NaN detected at epoch {epoch}, batch {batch_idx} !!!")
+                print("Loss dict:", loss_dict)
+                print("Skipping this batch...")
+                continue
             
             # Backward pass
             optimizer.zero_grad()
@@ -528,12 +572,12 @@ def train_vae(model, train_loader, num_epochs=100, lr=1e-4, device='cuda',
             epoch_losses[k] /= len(train_loader)
         
         scheduler.step()
-        if epoch%300==0:
-            print(f"\n=== Epoch {epoch+1} Summary ===")
-            print(f"Total: {epoch_losses['total']:.4f} | Recon: {epoch_losses['recon']:.4f}")
-            print(f"Chamfer: {epoch_losses['chamfer']:.4f} | KL: {epoch_losses['kl']:.4f}")
-            print(f"SH_DC: {epoch_losses['sh_dc']:.4f} | Opacity: {epoch_losses['opacity']:.4f}")
-            print(f"Scale: {epoch_losses['scale']:.4f} | Rotation: {epoch_losses['rotation']:.4f}\n")
+        
+        print(f"\n=== Epoch {epoch+1} Summary ===")
+        print(f"Total: {epoch_losses['total']:.4f} | Recon: {epoch_losses['recon']:.4f}")
+        print(f"Chamfer: {epoch_losses['chamfer']:.4f} | KL: {epoch_losses['kl']:.4f}")
+        print(f"SH_DC: {epoch_losses['sh_dc']:.4f} | Opacity: {epoch_losses['opacity']:.4f}")
+        print(f"Scale: {epoch_losses['scale']:.4f} | Rotation: {epoch_losses['rotation']:.4f}\n")
         
         # Save best model
         if epoch_losses['total'] < best_loss:
@@ -597,11 +641,12 @@ def save_ply(path, xyz, sh_dc, opacity, scale, rotation):
 
 
 if __name__ == "__main__":
-    # Configuration for LARGER model with better capacity
-    GRID_SIZE = 128  # Larger grid: 64x64 for more detail
-    LATENT_DIM = 512  # Larger latent: 512D
-    HIDDEN_DIM = 1024  # Larger network: 1024D
-    MAX_POINTS = 30000  # More points for better coverage
+    # Configuration - REDUCED for memory efficiency
+    GRID_SIZE = 48  # Smaller grid: 48x48 (was 64x64)
+    LATENT_DIM = 256  # Smaller latent: 256D (was 512D)
+    HIDDEN_DIM = 512  # Smaller network: 512D (was 1024D)
+    MAX_POINTS = 8192  # Fewer points during training (was 32768)
+    SAMPLES_PER_CELL = 32  # Fewer samples per cell = 48*48*4 = 9,216 splats
     
     # Single file training
     ply_path = "/home/lu/Documents/117-final-proj/3DGS_PLY_sample_data/PLY(postshot)/cactus_splat3_30kSteps_142k_splats.ply"
@@ -610,7 +655,7 @@ if __name__ == "__main__":
     xyz_orig, sh_dc_orig, opacity_orig, scale_orig, rotation_orig = load_3dgs_ply(ply_path)
     
     # Create dataset with single file repeated (for DataLoader compatibility)
-    dataset = GaussianSplatDataset([ply_path], max_points=MAX_POINTS)
+    dataset = GaussianSplatDataset([ply_path], max_points=MAX_POINTS, subsample_for_training=True)
     train_loader = torch.utils.data.DataLoader(
         dataset, 
         batch_size=1,
@@ -637,17 +682,19 @@ if __name__ == "__main__":
     # Train on single file (overfitting is OK - we're learning the compression)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on: {device}\n")
-    
-    trained_model = train_vae(
-        model, 
-        train_loader, 
-        num_epochs=2000,  # More epochs since single file
-        lr=1e-4,
-        device=device,
-        kl_weight_schedule='warmup',
-        save_path='gs_vae_cactus.pt'
-    )
-    
+    state_dict = torch.load('gs_vae_cactus.pt', map_location='cpu') 
+
+    model.load_state_dict(state_dict['model_state_dict'])
+    model.to(device)
+    # trained_model = train_vae(
+    #     model, 
+    #     train_loader, 
+    #     num_epochs=2000,  # Reduced epochs
+    #     lr=2e-4,  # Lower learning rate
+    #     device=device,
+    #     kl_weight_schedule='warmup',
+    #     save_path='gs_vae_cactus.pt'
+    # )
     # === RECONSTRUCTION ===
     print("\n" + "="*60)
     print("=== RECONSTRUCTION TEST ===")
@@ -655,30 +702,80 @@ if __name__ == "__main__":
     
     model.eval()
     with torch.no_grad():
-        # Load the full original data
-        sample = dataset[0]
-        xyz = sample['xyz'].unsqueeze(0).to(device)
-        sh_dc = sample['sh_dc'].unsqueeze(0).to(device)
-        opacity = sample['opacity'].unsqueeze(0).to(device)
-        scale = sample['scale'].unsqueeze(0).to(device)
-        rotation = sample['rotation'].unsqueeze(0).to(device)
+        # Load the FULL original data (not subsampled!)
+        print("Loading FULL original data for reconstruction...")
+        xyz_full, sh_dc_full, opacity_full, scale_full, rotation_full = load_3dgs_ply(ply_path)
         
-        # Encode to grid
-        grid, mu, logvar = model(xyz, sh_dc, opacity, scale, rotation)
-
+        # Process in chunks if too large
+        CHUNK_SIZE = 8192  # Smaller chunks
+        N_full = len(xyz_full)
         
-        # Decode back to 3D Gaussians
+        if N_full > CHUNK_SIZE:
+            print(f"Processing {N_full:,} splats in chunks of {CHUNK_SIZE:,}...")
+            
+            # Encode all chunks and average the latent codes
+            all_mus = []
+            all_logvars = []
+            
+            for i in range(0, N_full, CHUNK_SIZE):
+                chunk_end = min(i + CHUNK_SIZE, N_full)
+                print(f"  Encoding chunk {i//CHUNK_SIZE + 1}/{(N_full + CHUNK_SIZE - 1)//CHUNK_SIZE}...")
+                
+                xyz_chunk = torch.from_numpy(xyz_full[i:chunk_end]).unsqueeze(0).to(device)
+                sh_dc_chunk = torch.from_numpy(sh_dc_full[i:chunk_end]).unsqueeze(0).to(device)
+                opacity_chunk = torch.from_numpy(opacity_full[i:chunk_end]).unsqueeze(0).unsqueeze(-1).to(device)
+                scale_chunk = torch.from_numpy(scale_full[i:chunk_end]).unsqueeze(0).to(device)
+                rotation_chunk = torch.from_numpy(rotation_full[i:chunk_end]).unsqueeze(0).to(device)
+                
+                mu, logvar = model.encode(xyz_chunk, sh_dc_chunk, opacity_chunk, scale_chunk, rotation_chunk)
+                all_mus.append(mu)
+                all_logvars.append(logvar)
+            
+            # Average the latent codes from all chunks
+            mu = torch.stack(all_mus).mean(dim=0)
+            logvar = torch.stack(all_logvars).mean(dim=0)
+            print(f"  Averaged {len(all_mus)} chunk encodings")
+        else:
+            # Small enough to process at once
+            xyz = torch.from_numpy(xyz_full).unsqueeze(0).to(device)
+            sh_dc = torch.from_numpy(sh_dc_full).unsqueeze(0).to(device)
+            opacity = torch.from_numpy(opacity_full).unsqueeze(0).unsqueeze(-1).to(device)
+            scale = torch.from_numpy(scale_full).unsqueeze(0).to(device)
+            rotation = torch.from_numpy(rotation_full).unsqueeze(0).to(device)
+            
+            mu, logvar = model.encode(xyz, sh_dc, opacity, scale, rotation)
+        
+        # Decode from the latent code
+        z = model.reparameterize(mu, logvar)
+        grid = model.decode(z)
+        
+        print(f"\nEncoded to grid shape: {grid.shape}")
+        print(f"Latent mean: {mu.mean().item():.4f} ± {mu.std().item():.4f}")
+        print(f"Latent logvar: {logvar.mean().item():.4f} ± {logvar.std().item():.4f}")
+        
+        # Decode back to 3D Gaussians with MORE samples
         recon_xyz, recon_sh_dc, recon_opacity, recon_scale, recon_rotation = \
-            model.grid_to_gaussians(grid, num_samples_per_cell=2)
+            model.grid_to_gaussians(grid, num_samples_per_cell=SAMPLES_PER_CELL)
         
-
+        print(f"\nOriginal splats: {N_full:,}")
+        print(f"Reconstructed splats: {recon_xyz.shape[1]:,}")
+        print(f"Target reconstruction: {GRID_SIZE * GRID_SIZE * SAMPLES_PER_CELL:,}")
         
-        # Compute reconstruction metrics
-        chamfer = chamfer_distance_manual(recon_xyz, xyz)
+        # Compute reconstruction metrics (on a sample, not all 142k)
+        sample_size = min(8192, N_full)  # Smaller sample
+        sample_indices = np.random.choice(N_full, sample_size, replace=False)
+        xyz_sample = torch.from_numpy(xyz_full[sample_indices]).unsqueeze(0).to(device)
         
-        sh_dc_error = F.mse_loss(recon_sh_dc[:, :xyz.shape[1]], sh_dc).item()
-        opacity_error = F.mse_loss(recon_opacity[:, :xyz.shape[1]], opacity).item()
-
+        chamfer = chamfer_distance_manual(recon_xyz[:, :sample_size], xyz_sample)
+        print(f"\nChamfer Distance (sampled): {chamfer.item():.6f}")
+        
+        sh_dc_error = F.mse_loss(recon_sh_dc[:, :sample_size], 
+                                 torch.from_numpy(sh_dc_full[sample_indices]).unsqueeze(0).to(device)).item()
+        opacity_error = F.mse_loss(recon_opacity[:, :sample_size], 
+                                   torch.from_numpy(opacity_full[sample_indices]).unsqueeze(0).unsqueeze(-1).to(device)).item()
+        print(f"SH DC MSE: {sh_dc_error:.6f}")
+        print(f"Opacity MSE: {opacity_error:.6f}")
+        
         # Save reconstructed PLY
         output_path = "cactus_reconstructed.ply"
         save_ply(
