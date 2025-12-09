@@ -7,16 +7,7 @@ import torch
 import numpy as np
 import pycolmap
 from pathlib import Path
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train Custom 3D Gaussian Splatting")
-    parser.add_argument("--data_path", type=str, required=True,
-                        help="Path to data directory with sparse/0 subdirectory")
-    parser.add_argument("--output_path", type=str, default="./outputs")
-    parser.add_argument("--iterations", type=int, default=30000)
-    parser.add_argument("--learning_rate", type=float, default=0.001)
-    return parser.parse_args()
+from renderer import render_all_views
 
 
 class GaussianSplattingTrainer:
@@ -104,6 +95,11 @@ class GaussianSplattingTrainer:
         }, checkpoint_path)
         print(f"Saved: {checkpoint_path}")
     
+    def render(self, output_subdir="renders"):
+        """Render all camera views"""
+        render_dir = self.output_path / output_subdir
+        render_all_views(self, render_dir)
+    
     def train(self):
         """Main training loop"""
         print("=" * 50)
@@ -137,9 +133,28 @@ class GaussianSplattingTrainer:
 
 
 def main():
-    args = parse_args()
+    # ╰─ python 3dgs/custom_gaussian_splatter/train.py --data_path ./data/IMG_9184 --render_only                                       ─╯
+
+    parser = argparse.ArgumentParser(description="Train Custom 3D Gaussian Splatting")
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="Path to data directory with sparse/0 subdirectory")
+    parser.add_argument("--output_path", type=str, default="./outputs")
+    parser.add_argument("--iterations", type=int, default=30000)
+    parser.add_argument("--learning_rate", type=float, default=0.001)
+    parser.add_argument("--render_only", action="store_true",
+                        help="Only render, don't train")
+
+    args = parser.parse_args()
     trainer = GaussianSplattingTrainer(args)
-    trainer.train()
+    
+    if args.render_only:
+        # Just load data and render
+        trainer.load_colmap_data()
+        trainer.init_gaussians()
+        trainer.render()
+    else:
+        # Normal training
+        trainer.train()
 
 
 if __name__ == "__main__":
