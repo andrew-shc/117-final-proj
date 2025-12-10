@@ -352,7 +352,6 @@ def decode_to_gs(model, mu, logvar, device='cuda', num_samples_per_cell=32):
         recon_rotation = torch.cat(all_rotation, dim=1)
     return recon_xyz, recon_sh_dc, recon_opacity, recon_scale, recon_rotation
 def save_ply(path, xyz, sh_dc, opacity, scale, rotation):
-
     N = len(xyz)
     dtype = [
         ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
