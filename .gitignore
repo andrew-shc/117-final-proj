@@ -3,3 +3,4 @@ outputs
 point_e_model_cache
 data
 test_output
+__pycache__/

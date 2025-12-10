@@ -682,19 +682,19 @@ if __name__ == "__main__":
     # Train on single file (overfitting is OK - we're learning the compression)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on: {device}\n")
-    state_dict = torch.load('gs_vae_cactus.pt', map_location='cpu') 
+    # state_dict = torch.load('gs_vae_cactus.pt', map_location='cpu') 
 
-    model.load_state_dict(state_dict['model_state_dict'])
-    model.to(device)
-    # trained_model = train_vae(
-    #     model, 
-    #     train_loader, 
-    #     num_epochs=2000,  # Reduced epochs
-    #     lr=2e-4,  # Lower learning rate
-    #     device=device,
-    #     kl_weight_schedule='warmup',
-    #     save_path='gs_vae_cactus.pt'
-    # )
+    # model.load_state_dict(state_dict['model_state_dict'])
+    # model.to(device)
+    trained_model = train_vae(
+        model, 
+        train_loader, 
+        num_epochs=2000,  # Reduced epochs
+        lr=2e-4,  # Lower learning rate
+        device=device,
+        kl_weight_schedule='warmup',
+        save_path='gs_vae_cactus.pt'
+    )
     # === RECONSTRUCTION ===
     print("\n" + "="*60)
     print("=== RECONSTRUCTION TEST ===")
