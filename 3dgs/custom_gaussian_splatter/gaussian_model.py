@@ -398,3 +398,155 @@ class GSplats:
 
     def __repr__(self):
         return f"GSplats(num_gaussians={self.num_gaussians}, device={self.device})"
+
+    def densify_and_split(self, avg_gradients: torch.Tensor, gradient_threshold: float, size_threshold: float, N: int = 2):
+        """
+        Densify Gaussians by splitting large Gaussians with high gradients.
+        
+        Split strategy:
+        - For each Gaussian to split, create N new Gaussians
+        - New Gaussians are positioned using samples from the original Gaussian's distribution
+        - Scales are divided by (0.8 * N) to maintain similar volume coverage
+        
+        Args:
+            avg_gradients: average gradient norm per Gaussian [num_gaussians, 1]
+            gradient_threshold: split Gaussians with avg gradient norm above this
+            size_threshold: split Gaussians with max scale above this
+            N: number of new Gaussians to create from each split (default: 2)
+        """
+        if self.positions is None or avg_gradients is None:
+            return
+        
+        # Find Gaussians that are large AND have high gradients
+        max_scales = torch.max(self.scales, dim=1)[0]
+        high_gradient_mask = (avg_gradients.squeeze() > gradient_threshold)
+        large_mask = (max_scales > size_threshold)
+        split_mask = high_gradient_mask & large_mask
+        
+        num_to_split = split_mask.sum().item()
+        if num_to_split == 0:
+            return
+        
+        # Get Gaussians to split
+        split_positions = self.positions[split_mask]
+        split_colors = self.colors[split_mask]
+        split_scales = self.scales[split_mask]
+        split_rotations = self.rotations[split_mask]
+        split_opacities = self.opacities[split_mask]
+        
+        # Create N new Gaussians for each split
+        new_gaussians_list = []
+        for i in range(N):
+            # Sample positions from the Gaussian distribution
+            # Use the scale to determine sampling range
+            std = split_scales * 0.5  # Sample within ~half the scale
+            samples = torch.randn_like(split_positions) * std
+            new_positions = split_positions + samples
+            
+            # Reduce scale of new Gaussians to maintain coverage
+            new_scales = split_scales / (0.8 * N)
+            
+            new_gaussians_list.append({
+                'positions': new_positions,
+                'colors': split_colors.clone(),
+                'scales': new_scales,
+                'rotations': split_rotations.clone(),
+                'opacities': split_opacities.clone(),
+            })
+        
+        # Remove original Gaussians that were split
+        keep_mask = ~split_mask
+        self.positions = self.positions[keep_mask]
+        self.colors = self.colors[keep_mask]
+        self.scales = self.scales[keep_mask]
+        self.rotations = self.rotations[keep_mask]
+        self.opacities = self.opacities[keep_mask]
+        
+        # Add all new Gaussians
+        for new_gaussians in new_gaussians_list:
+            self.positions = torch.cat([self.positions, new_gaussians['positions']], dim=0)
+            self.colors = torch.cat([self.colors, new_gaussians['colors']], dim=0)
+            self.scales = torch.cat([self.scales, new_gaussians['scales']], dim=0)
+            self.rotations = torch.cat([self.rotations, new_gaussians['rotations']], dim=0)
+            self.opacities = torch.cat([self.opacities, new_gaussians['opacities']], dim=0)
+        
+        print(f"Split {num_to_split} large Gaussians into {num_to_split * N} new Gaussians (total: {self.num_gaussians})")
+    
+    def densify_and_clone(self, avg_gradients: torch.Tensor, gradient_threshold: float, size_threshold: float):
+        """
+        Densify Gaussians by cloning small Gaussians with high gradients.
+        
+        Clone strategy:
+        - Duplicate small Gaussians that have high gradients
+        - New Gaussians are offset slightly in the direction of the gradient
+        - All other parameters are copied exactly
+        
+        Args:
+            avg_gradients: average gradient norm per Gaussian [num_gaussians, 1]
+            gradient_threshold: clone Gaussians with avg gradient norm above this
+            size_threshold: clone Gaussians with max scale below this
+        """
+        if self.positions is None or avg_gradients is None:
+            return
+        
+        # Find Gaussians that are small AND have high gradients
+        max_scales = torch.max(self.scales, dim=1)[0]
+        high_gradient_mask = (avg_gradients.squeeze() > gradient_threshold)
+        small_mask = (max_scales <= size_threshold)
+        clone_mask = high_gradient_mask & small_mask
+        
+        num_to_clone = clone_mask.sum().item()
+        if num_to_clone == 0:
+            return
+        
+        # Get Gaussians to clone
+        clone_positions = self.positions[clone_mask]
+        clone_colors = self.colors[clone_mask]
+        clone_scales = self.scales[clone_mask]
+        clone_rotations = self.rotations[clone_mask]
+        clone_opacities = self.opacities[clone_mask]
+        
+        # Clone with slight offset for better coverage
+        # Offset in a random direction by a small fraction of the scale
+        offset = torch.randn_like(clone_positions) * clone_scales.mean(dim=1, keepdim=True) * 0.1
+        new_positions = clone_positions + offset
+        
+        # Concatenate cloned Gaussians
+        self.positions = torch.cat([self.positions, new_positions], dim=0)
+        self.colors = torch.cat([self.colors, clone_colors], dim=0)
+        self.scales = torch.cat([self.scales, clone_scales], dim=0)
+        self.rotations = torch.cat([self.rotations, clone_rotations], dim=0)
+        self.opacities = torch.cat([self.opacities, clone_opacities], dim=0)
+        
+        print(f"Cloned {num_to_clone} small Gaussians (total: {self.num_gaussians})")
+    
+    def prune_gaussians(self, opacity_threshold: float = 0.01, extent_threshold: float = None):
+        """
+        Remove Gaussians with very low opacity or that are too large.
+        
+        Args:
+            opacity_threshold: remove Gaussians with opacity below this
+            extent_threshold: remove Gaussians with scale above this (optional)
+        """
+        if self.positions is None or self.opacities is None:
+            return
+        
+        # Create mask for Gaussians to keep
+        keep_mask = self.opacities.squeeze() > opacity_threshold
+        
+        if extent_threshold is not None and self.scales is not None:
+            max_scales = torch.max(self.scales, dim=1)[0]
+            keep_mask = keep_mask & (max_scales < extent_threshold)
+        
+        num_removed = (~keep_mask).sum().item()
+        if num_removed == 0:
+            return
+        
+        # Apply mask to all parameters
+        self.positions = self.positions[keep_mask]
+        self.colors = self.colors[keep_mask]
+        self.scales = self.scales[keep_mask]
+        self.rotations = self.rotations[keep_mask]
+        self.opacities = self.opacities[keep_mask]
+        
+        print(f"Pruned {num_removed} Gaussians (kept {self.num_gaussians})")

@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 from gaussian_model import GSplats
-from renderer import Rasterizer
+from diff_renderer import DifferentiableRasterizer
 from tqdm import tqdm
 import numpy as np
 from PIL import Image as PILImage
@@ -25,7 +25,7 @@ class Trainer:
         # Initialize Gaussian model
         self.gaussians = GSplats(device=self.device)
 
-        # Rasterizer for rendering
+        # Rasterizer (differentiable version)
         self.rasterizer = None
 
         # Ground truth images directory
@@ -49,8 +49,8 @@ class Trainer:
             initial_opacity=0.5
         )
 
-        # Initialize rasterizer
-        self.rasterizer = Rasterizer(self.gaussians)
+        # Initialize rasterizer (differentiable version for both training and rendering)
+        self.rasterizer = DifferentiableRasterizer(self.gaussians)
 
         # Set up images directory for lazy loading
         self.setup_images_dir()
@@ -146,8 +146,13 @@ class Trainer:
             width = camera.width
             height = camera.height
 
-        # Render the image at scaled resolution (returns PyTorch tensor with gradients)
-        rendered_tensor = self.rasterizer.rasterize(camera, image, width=width, height=height, verbose=False)
+        # Render the image at scaled resolution using differentiable rasterizer
+        # (returns PyTorch tensor with full gradient flow)
+        rendered_tensor = self.rasterizer.rasterize(
+            camera, image, 
+            width=width, height=height, 
+            verbose=False
+        )
 
         # Load ground truth image on demand (lazy loading, automatically scaled)
         gt_tensor = self.load_gt_image(image_id)
@@ -174,8 +179,36 @@ class Trainer:
     def render(self, output_subdir="renders", debug=False):
         """Render all camera views"""
         render_dir = self.output_path / output_subdir
-        rasterizer = Rasterizer(self.gaussians)
-        rasterizer.render_dataset(render_dir, verbose=True, debug=debug)
+        render_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"Rendering {len(self.gaussians.images)} views...")
+        print(f"Total Gaussians in scene: {self.gaussians.num_gaussians}")
+        print()
+        
+        for idx, (image_id, image) in enumerate(self.gaussians.images.items()):
+            camera = self.gaussians.cameras[image.camera_id]
+            
+            print(f"[{idx+1}/{len(self.gaussians.images)}] {image.name}")
+            
+            # Render with differentiable rasterizer
+            with torch.no_grad():
+                rendered_tensor = self.rasterizer.rasterize(
+                    camera, image, 
+                    verbose=True
+                )
+            
+            # Convert to numpy and save
+            rendered = rendered_tensor.cpu().numpy()
+            rendered_uint8 = (np.clip(rendered, 0, 1) * 255).astype(np.uint8)
+            
+            # Save to disk
+            output_path = render_dir / f"{image.name}.png"
+            pil_image = PILImage.fromarray(rendered_uint8)
+            pil_image.save(output_path)
+            
+            print()
+        
+        print(f"✓ All rendered images saved to {render_dir}")
 
     def render_test_image(self, iteration, image_id=None):
         """
@@ -261,6 +294,9 @@ class Trainer:
 
             # Backward pass
             loss.backward()
+            
+            # Update gradient accumulation for densification
+            self.rasterizer.update_gradient_accum()
 
             # Gradient clipping to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
@@ -279,6 +315,48 @@ class Trainer:
                 # Clamp scales to positive values (min 1e-5)
                 if self.gaussians.scales is not None:
                     self.gaussians.scales.clamp_(1e-5, 10.0)
+            
+            # Adaptive density control (densification and pruning)
+            if self.args.densify_from_iter <= iteration < self.args.densify_until_iter:
+                # Densify every N iterations
+                if iteration % self.args.densification_interval == 0:
+                    # Get average gradients
+                    avg_gradients = self.rasterizer.get_average_gradient_norm()
+                    
+                    if avg_gradients is not None:
+                        # Clone small Gaussians with high gradients
+                        self.gaussians.densify_and_clone(
+                            avg_gradients,
+                            self.args.densify_grad_threshold,
+                            self.args.densify_size_threshold
+                        )
+                        
+                        # Split large Gaussians with high gradients
+                        self.gaussians.densify_and_split(
+                            avg_gradients,
+                            self.args.densify_grad_threshold,
+                            self.args.densify_size_threshold,
+                            N=2
+                        )
+                        
+                        # Prune low-opacity Gaussians
+                        self.gaussians.prune_gaussians(self.args.prune_opacity_threshold)
+                        
+                        # Reset gradient accumulation after densification
+                        self.rasterizer.reset_gradient_accum()
+                        
+                        # Update optimizer with new parameters
+                        params = self.gaussians.get_optimizable_parameters()
+                        optimizer = torch.optim.Adam(params, lr=self.args.learning_rate)
+                        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+            
+            # Periodic opacity reset (helps prevent overfitting)
+            if self.args.opacity_reset_interval > 0 and iteration % self.args.opacity_reset_interval == 0:
+                with torch.no_grad():
+                    # Reset opacities to a moderate value
+                    if self.gaussians.opacities is not None:
+                        self.gaussians.opacities.fill_(0.3)
+                print(f"\n[Iteration {iteration}] Reset opacities to 0.3")
 
             # Update EMA loss for smoother display
             current_loss = loss.item()
@@ -340,6 +418,22 @@ def main():
                         help="Path to PLY file to load Gaussians from (for rendering)")
     parser.add_argument("--save_ply", action="store_true",
                         help="Save model as PLY file after loading (useful for converting checkpoints to PLY)")
+    
+    # Densification arguments
+    parser.add_argument("--densify_from_iter", type=int, default=500,
+                        help="Start densification from this iteration (default: 500)")
+    parser.add_argument("--densify_until_iter", type=int, default=15000,
+                        help="Stop densification at this iteration (default: 15000)")
+    parser.add_argument("--densify_grad_threshold", type=float, default=0.0002,
+                        help="Gradient threshold for densification (default: 0.0002)")
+    parser.add_argument("--densify_size_threshold", type=float, default=0.01,
+                        help="Size threshold for splitting/cloning (default: 0.01)")
+    parser.add_argument("--densification_interval", type=int, default=100,
+                        help="Perform densification every N iterations (default: 100)")
+    parser.add_argument("--opacity_reset_interval", type=int, default=3000,
+                        help="Reset opacities every N iterations (default: 3000, 0 to disable)")
+    parser.add_argument("--prune_opacity_threshold", type=float, default=0.005,
+                        help="Prune Gaussians below this opacity (default: 0.005)")
 
     args = parser.parse_args()
     trainer = Trainer(args)
@@ -378,8 +472,12 @@ def main():
 # python 3dgs/custom_gaussian_splatter/train.py --data_path ./data/IMG_9184 --render_only --frame_skip 10
 # python 3dgs/custom_gaussian_splatter/train.py \
 #  --data_path ./data/IMG_9184 --iterations 10000 --frame_skip 10 \
-#  --resolution_scale 0.25 --learning_rate=0.005 \
+#  --resolution_scale 0.25 --learning_rate=0.002 \
 #  --save_progress_images --progress_image_interval 1
+#  --data_path ./data/IMG_9184 \
+#  --densify_grad_threshold 0.0002 \
+#  --densify_size_threshold 0.01 \
+#  --densification_interval 2
 
 # python 3dgs/custom_gaussian_splatter/train.py --data_path ./data/IMG_9184 --render_only --ply_path ./outputs/model_latest.ply --frame_skip 10
 
